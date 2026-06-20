@@ -59,16 +59,23 @@ async function api(path, options = {}) {
 }
 
 class PerformanceTrackerPanel {
-  constructor() {
+  constructor(embedded = false) {
+    this.embedded = embedded;
     this.activeTab = "models";
     this.loaded = false;
     this.limit = 50;
     this.root = el("section", { class: "pt-panel", "aria-label": "Performance Tracker" });
-    this.button = el("button", { class: "pt-rail-button", text: "Perf", title: "Performance Tracker", onclick: () => this.toggle() });
+    this.button = embedded ? null : el("button", { class: "pt-rail-button", text: "Perf", title: "Performance Tracker", onclick: () => this.toggle() });
     this.build();
   }
 
-  mount() {
+  mount(parent = document.body) {
+    if (this.embedded) {
+      parent.append(this.root);
+      this.root.classList.add("pt-sidebar", "is-open");
+      this.refresh();
+      return;
+    }
     document.body.append(this.button, this.root);
   }
 
@@ -82,7 +89,7 @@ class PerformanceTrackerPanel {
         el("div", { class: "pt-actions" }, [
           el("button", { text: "Refresh", onclick: () => this.refresh() }),
           el("button", { text: "Clear", class: "pt-danger", onclick: () => this.clearHistory() }),
-          el("button", { text: "x", title: "Close", onclick: () => this.close() }),
+          el("button", { text: "x", title: "Close", hidden: this.embedded ? "" : null, onclick: () => this.close() }),
         ]),
       ]),
     );
@@ -391,6 +398,18 @@ function injectStyles() {
       font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     .pt-panel.is-open { display: flex; }
+    .pt-panel.pt-sidebar {
+      position: relative;
+      inset: auto;
+      z-index: auto;
+      width: 100%;
+      height: 100%;
+      max-height: 100%;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      background: transparent;
+    }
     .pt-header {
       display: flex;
       justify-content: space-between;
@@ -525,13 +544,36 @@ function injectStyles() {
   ` }));
 }
 
+function registerPerformanceSidebar() {
+  if (app?.extensionManager?.registerSidebarTab) {
+    app.extensionManager.registerSidebarTab({
+      id: "jonmsales.performance-tracker",
+      icon: "pi pi-chart-line",
+      title: "Performance",
+      tooltip: "Performance Tracker",
+      type: "custom",
+      render: (el) => {
+        el.style.height = "100%";
+        injectStyles();
+        const panel = new PerformanceTrackerPanel(true);
+        panel.mount(el);
+      },
+    });
+    return true;
+  }
+  return false;
+}
+
 app.registerExtension({
   name: "ComfyUI.PerformanceTracker",
-  setup() {
+  init() {
     injectStyles();
-    const panel = new PerformanceTrackerPanel();
-    panel.mount();
+    if (!registerPerformanceSidebar()) {
+      const panel = new PerformanceTrackerPanel(false);
+      panel.mount();
+    }
   },
 });
+
 
 

@@ -46,6 +46,18 @@ function modelLabel(row, sourceKey = "primary_model") {
   return row?.[`${sourceKey}_display`] || row?.[sourceKey] || "-";
 }
 
+function compareValues(left, right) {
+  const leftMissing = left === null || left === undefined || left === "";
+  const rightMissing = right === null || right === undefined || right === "";
+  if (leftMissing && rightMissing) return 0;
+  if (leftMissing) return -1;
+  if (rightMissing) return 1;
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+  return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`${API_ROOT}${path}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -71,6 +83,13 @@ class PerformanceTrackerPanel {
     this.settings = { use_friendly_model_names: true, hide_file_extensions: true, stats_limit: 50 };
     this.aliases = [];
     this.modelCandidates = [];
+    this.sorts = {
+      models: { key: "avg_duration_ms", direction: "desc" },
+      recent: { key: "end_ts", direction: "desc" },
+      workflows: { key: "avg_duration_ms", direction: "desc" },
+      loras: { key: "avg_duration_ms", direction: "desc" },
+      groupRuns: { key: "end_ts", direction: "desc" },
+    };
     this.root = el("section", { class: "pt-panel", "aria-label": "Performance Tracker" });
     this.button = embedded ? null : el("button", { class: "pt-rail-button", text: "Perf", title: "Performance Tracker", onclick: () => this.toggle() });
     this.build();
@@ -194,7 +213,17 @@ class PerformanceTrackerPanel {
   }
 
   renderModels(rows) {
-    this.renderTable(["Model", "Runs", "Average", "Fastest", "Slowest", "Avg Steps", "Avg MP"], rows, (row) => [
+    const columns = [
+      { label: "Model", key: "model_display", sortValue: (row) => modelLabel(row, "model") },
+      { label: "Runs", key: "run_count", sortValue: (row) => Number(row.run_count) || 0 },
+      { label: "Average", key: "avg_duration_ms", sortValue: (row) => Number(row.avg_duration_ms) || -1 },
+      { label: "Fastest", key: "fastest_ms", sortValue: (row) => Number(row.fastest_ms) || -1 },
+      { label: "Slowest", key: "slowest_ms", sortValue: (row) => Number(row.slowest_ms) || -1 },
+      { label: "Avg Steps", key: "avg_steps", sortValue: (row) => Number(row.avg_steps) || -1 },
+      { label: "Avg MP", key: "avg_pixels", sortValue: (row) => Number(row.avg_pixels) || -1 },
+    ];
+    rows = this.sortRows(rows, "models", columns);
+    this.renderTable(columns, rows, (row) => [
       modelLabel(row, "model"),
       formatRunCount(row),
       formatDuration(row.avg_duration_ms),
@@ -206,7 +235,9 @@ class PerformanceTrackerPanel {
   }
 
   renderRuns(rows) {
-    const table = this.makeTable(["When", "Duration", "Model", "Sampler", "Steps", "Resolution", "Nodes", "Status", "Avg"]);
+    const columns = this.runColumns(false);
+    rows = this.sortRows(rows, "recent", columns);
+    const table = this.makeTable(columns, "recent");
     for (const row of rows) {
       const tr = el("tr", { class: row.excluded_from_stats ? "is-excluded" : "", onclick: () => this.openRun(row.prompt_id), title: "Open run detail" });
       tr.append(
@@ -228,7 +259,15 @@ class PerformanceTrackerPanel {
   }
 
   renderWorkflows(rows) {
-    this.renderTable(["Workflow", "Runs", "Average", "Slowest", "Sample Model"], rows, (row) => [
+    const columns = [
+      { label: "Workflow", key: "workflow_hash", sortValue: (row) => shortHash(row.workflow_hash) },
+      { label: "Runs", key: "run_count", sortValue: (row) => Number(row.run_count) || 0 },
+      { label: "Average", key: "avg_duration_ms", sortValue: (row) => Number(row.avg_duration_ms) || -1 },
+      { label: "Slowest", key: "slowest_ms", sortValue: (row) => Number(row.slowest_ms) || -1 },
+      { label: "Sample Model", key: "sample_model_display", sortValue: (row) => modelLabel(row, "sample_model") },
+    ];
+    rows = this.sortRows(rows, "workflows", columns);
+    this.renderTable(columns, rows, (row) => [
       shortHash(row.workflow_hash),
       formatRunCount(row),
       formatDuration(row.avg_duration_ms),
@@ -238,15 +277,21 @@ class PerformanceTrackerPanel {
   }
 
   renderLoras(rows) {
-    this.renderTable(["LoRA", "Runs", "Average"], rows, (row) => [
+    const columns = [
+      { label: "LoRA", key: "lora", sortValue: (row) => row.lora || "" },
+      { label: "Runs", key: "run_count", sortValue: (row) => Number(row.run_count) || 0 },
+      { label: "Average", key: "avg_duration_ms", sortValue: (row) => Number(row.avg_duration_ms) || -1 },
+    ];
+    rows = this.sortRows(rows, "loras", columns);
+    this.renderTable(columns, rows, (row) => [
       row.lora,
       formatRunCount(row),
       formatDuration(row.avg_duration_ms),
     ], (row) => this.openRunGroup({ type: "lora", value: row.lora, label: row.lora }));
   }
 
-  renderTable(headers, rows, mapRow, onRowClick = null) {
-    const table = this.makeTable(headers);
+  renderTable(columns, rows, mapRow, onRowClick = null) {
+    const table = this.makeTable(columns, this.activeTab);
     const body = table.querySelector("tbody");
     for (const row of rows) {
       const attrs = onRowClick ? { class: "is-clickable", title: "Show individual runs", onclick: () => onRowClick(row) } : {};
@@ -255,11 +300,58 @@ class PerformanceTrackerPanel {
     this.content.replaceChildren(rows.length ? table : this.empty("No matching records yet."));
   }
 
-  makeTable(headers) {
+  makeTable(columns, sortScope = null) {
     return el("table", { class: "pt-table" }, [
-      el("thead", {}, el("tr", {}, headers.map((header) => el("th", { text: header })))),
+      el("thead", {}, el("tr", {}, columns.map((column) => this.makeHeaderCell(column, sortScope)))),
       el("tbody"),
     ]);
+  }
+
+  makeHeaderCell(column, sortScope) {
+    const label = typeof column === "string" ? column : column.label;
+    if (!sortScope || !column?.key) return el("th", { text: label });
+    const active = this.sorts[sortScope]?.key === column.key;
+    const direction = active ? this.sorts[sortScope].direction : "";
+    const button = el("button", {
+      class: `pt-sort ${active ? "is-active" : ""}`,
+      text: `${label}${active ? (direction === "asc" ? " ↑" : " ↓") : ""}`,
+      onclick: () => this.setSort(sortScope, column.key),
+    });
+    return el("th", {}, button);
+  }
+
+  setSort(scope, key) {
+    const current = this.sorts[scope] || {};
+    this.sorts[scope] = {
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    };
+    this.refresh();
+  }
+
+  sortRows(rows, scope, columns) {
+    const sort = this.sorts[scope];
+    const column = columns.find((candidate) => candidate.key === sort?.key);
+    if (!column) return rows;
+    const direction = sort.direction === "asc" ? 1 : -1;
+    const valueFor = column.sortValue || ((row) => row[column.key]);
+    return [...rows].sort((a, b) => compareValues(valueFor(a), valueFor(b)) * direction);
+  }
+
+  runColumns(includeAction) {
+    const columns = [
+      { label: "When", key: "end_ts", sortValue: (row) => Number(row.end_ts || row.start_ts || 0) },
+      { label: "Duration", key: "duration_ms", sortValue: (row) => Number(row.duration_ms) || -1 },
+      { label: "Model", key: "primary_model_display", sortValue: (row) => modelLabel(row) },
+      { label: "Sampler", key: "primary_sampler", sortValue: (row) => row.primary_sampler || "" },
+      { label: "Steps", key: "primary_steps", sortValue: (row) => Number(row.primary_steps) || -1 },
+      { label: "Resolution", key: "resolution", sortValue: (row) => (Number(row.primary_width) || 0) * (Number(row.primary_height) || 0) * (Number(row.primary_batch_size) || 1) },
+      { label: "Nodes", key: "total_node_count", sortValue: (row) => Number(row.total_node_count) || 0 },
+      { label: includeAction ? "Avg" : "Status", key: includeAction ? "excluded_from_stats" : "status", sortValue: (row) => includeAction ? Number(Boolean(row.excluded_from_stats)) : row.status || "" },
+    ];
+    if (includeAction) columns.push({ label: "Action" });
+    else columns.push({ label: "Avg", key: "excluded_from_stats", sortValue: (row) => Number(Boolean(row.excluded_from_stats)) });
+    return columns;
   }
 
   async openRunGroup(group) {
@@ -288,7 +380,9 @@ class PerformanceTrackerPanel {
 
   makeGroupRunsTable(rows, dialog, group) {
     if (!rows.length) return null;
-    const table = this.makeTable(["When", "Duration", "Model", "Sampler", "Steps", "Resolution", "Nodes", "Avg", "Action"]);
+    const columns = this.runColumns(true);
+    rows = this.sortRows(rows, "groupRuns", columns);
+    const table = this.makeTable(columns, "groupRuns");
     const body = table.querySelector("tbody");
     for (const row of rows) {
       const action = el("button", {
@@ -642,6 +736,22 @@ function injectStyles() {
       background: #16191f;
       color: #aab2bf;
       z-index: 1;
+    }
+    .pt-table th .pt-sort {
+      width: 100%;
+      min-height: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .pt-table th .pt-sort:hover,
+    .pt-table th .pt-sort.is-active {
+      color: #ffffff;
     }
     .pt-table tbody tr:hover { background: #20242b; cursor: default; }
     .pt-table tbody tr.is-clickable:hover, .pt-table tbody tr[title]:hover { cursor: pointer; }

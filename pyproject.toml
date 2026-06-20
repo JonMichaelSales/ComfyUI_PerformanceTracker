@@ -12,7 +12,8 @@ Repository = "https://github.com/JonMichaelSales/ComfyUI_PerformanceTracker"
 Issues = "https://github.com/JonMichaelSales/ComfyUI_PerformanceTracker/issues"
 
 [tool.comfy]
-PublisherId = "CHANGE-ME"
+PublisherId = "jonmsales"
 DisplayName = "ComfyUI Performance Tracker"
 Icon = ""
+
 

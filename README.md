@@ -22,7 +22,7 @@ V1 is intentionally workflow-level tracking. It does not patch core node executi
 Clone or copy this folder into your ComfyUI `custom_nodes` directory:
 
 ```powershell
-git clone https://github.com/CHANGE-ME/ComfyUI-Performance-Tracker.git
+git clone https://github.com/JonMichaelSales/ComfyUI_PerformanceTracker.git
 ```
 
 Restart ComfyUI. The extension has no external Python dependencies.
@@ -35,7 +35,7 @@ Restart ComfyUI. The extension has no external Python dependencies.
 
 ## Publishing
 
-Before publishing to the Comfy Registry, replace the placeholder repository URL, `PublisherId`, and icon URL in `pyproject.toml`.
+Before publishing to the Comfy Registry, confirm the `PublisherId` and icon URL in `pyproject.toml`.
 
 Run the usual registry validation and publish flow:
 
@@ -43,3 +43,4 @@ Run the usual registry validation and publish flow:
 comfy node validate
 comfy node publish
 ```
+

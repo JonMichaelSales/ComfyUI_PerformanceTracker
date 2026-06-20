@@ -8,10 +8,11 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/CHANGE-ME/ComfyUI-Performance-Tracker"
-Issues = "https://github.com/CHANGE-ME/ComfyUI-Performance-Tracker/issues"
+Repository = "https://github.com/JonMichaelSales/ComfyUI_PerformanceTracker"
+Issues = "https://github.com/JonMichaelSales/ComfyUI_PerformanceTracker/issues"
 
 [tool.comfy]
 PublisherId = "CHANGE-ME"
 DisplayName = "ComfyUI Performance Tracker"
-Icon = "https://raw.githubusercontent.com/CHANGE-ME/ComfyUI-Performance-Tracker/main/icon.png"
+Icon = ""
+

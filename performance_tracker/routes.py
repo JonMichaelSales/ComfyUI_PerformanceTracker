@@ -8,7 +8,9 @@ from server import PromptServer
 from .database import (
     clear_history,
     get_run,
+    get_settings,
     list_runs,
+    save_settings,
     set_run_exclusion,
     stats_loras,
     stats_models,
@@ -79,6 +81,26 @@ def register_routes() -> None:
     async def performance_workflow_stats(request: web.Request) -> web.Response:
         limit = _bounded_int(request.query.get("limit"), 50, 1, 200)
         return web.json_response({"workflows": stats_workflows(limit)})
+
+    @routes.get("/performance-tracker/settings")
+    async def performance_settings(request: web.Request) -> web.Response:
+        return web.json_response(get_settings())
+
+    @routes.post("/performance-tracker/settings")
+    async def performance_save_settings(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_error(400, "BAD_JSON", "Expected a JSON settings payload.")
+        if not isinstance(body, dict):
+            return _json_error(400, "BAD_JSON", "Expected a JSON object.")
+        aliases = body.get("aliases")
+        if aliases is not None and not isinstance(aliases, list):
+            return _json_error(400, "BAD_ALIASES", "Aliases must be a list.")
+        settings = body.get("settings")
+        if settings is not None and not isinstance(settings, dict):
+            return _json_error(400, "BAD_SETTINGS", "Settings must be an object.")
+        return web.json_response(save_settings(settings or {}, aliases or []))
 
     @routes.post("/performance-tracker/admin/reindex")
     async def performance_reindex(request: web.Request) -> web.Response:

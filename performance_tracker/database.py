@@ -11,6 +11,12 @@ import folder_paths
 
 EXTENSION_NAME = "ComfyUI-Performance-Tracker"
 SCHEMA_VERSION = 1
+DEFAULT_SETTINGS = {
+    "use_friendly_model_names": True,
+    "hide_file_extensions": True,
+    "stats_limit": 50,
+}
+MODEL_EXTENSIONS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin")
 
 
 def data_dir() -> Path:
@@ -137,6 +143,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             subfolder TEXT,
             type TEXT,
             FOREIGN KEY(prompt_id) REFERENCES runs(prompt_id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_aliases (
+            model_name TEXT PRIMARY KEY,
+            friendly_name TEXT NOT NULL,
+            updated_at REAL NOT NULL
         )
         """
     )
@@ -331,12 +354,19 @@ def list_runs(
         where.append("excluded_from_stats = 0")
     clause = " AND ".join(where)
     with connect() as conn:
+        display_config = _display_config(conn)
         total = conn.execute(f"SELECT COUNT(*) AS count FROM runs WHERE {clause}", params).fetchone()["count"]
         rows = conn.execute(
             f"SELECT * FROM runs WHERE {clause} ORDER BY COALESCE(end_ts, updated_at * 1000) DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
-    return {"runs": [_run_summary(dict(row)) for row in rows], "total": total, "limit": limit, "offset": offset, "has_more": offset + len(rows) < total}
+    return {
+        "runs": [_run_summary(dict(row), display_config) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(rows) < total,
+    }
 
 
 def set_run_exclusion(prompt_id: str, excluded: bool, note: str | None = None) -> bool:
@@ -349,11 +379,12 @@ def set_run_exclusion(prompt_id: str, excluded: bool, note: str | None = None) -
 
 def get_run(prompt_id: str) -> dict[str, Any] | None:
     with connect() as conn:
+        display_config = _display_config(conn)
         row = conn.execute("SELECT * FROM runs WHERE prompt_id = ?", (prompt_id,)).fetchone()
         if not row:
             return None
         outputs = conn.execute("SELECT * FROM run_outputs WHERE prompt_id = ?", (prompt_id,)).fetchall()
-    detail = _run_summary(dict(row))
+    detail = _run_summary(dict(row), display_config)
     detail["factors"] = _load(row["factors_json"]) or {}
     detail["messages"] = _load(row["messages_json"]) or []
     detail["error_summary"] = _load(row["error_summary_json"])
@@ -378,6 +409,7 @@ def stats_overview() -> dict[str, Any]:
 
 def stats_models(limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
+        display_config = _display_config(conn)
         rows = conn.execute(
             """
             SELECT COALESCE(primary_model, '(unknown)') AS model,
@@ -396,7 +428,7 @@ def stats_models(limit: int = 50) -> list[dict[str, Any]]:
             """,
             (limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_add_model_display(dict(row), "model", "model_display", display_config) for row in rows]
 
 def stats_loras(limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
@@ -419,6 +451,7 @@ def stats_loras(limit: int = 50) -> list[dict[str, Any]]:
 
 def stats_workflows(limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
+        display_config = _display_config(conn)
         rows = conn.execute(
             """
             SELECT workflow_hash,
@@ -435,7 +468,7 @@ def stats_workflows(limit: int = 50) -> list[dict[str, Any]]:
             """,
             (limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_add_model_display(dict(row), "sample_model", "sample_model_display", display_config) for row in rows]
 
 def clear_history() -> None:
     with connect() as conn:
@@ -443,8 +476,48 @@ def clear_history() -> None:
             conn.execute(f"DELETE FROM {table}")
 
 
-def _run_summary(row: dict[str, Any]) -> dict[str, Any]:
-    return {
+def get_settings() -> dict[str, Any]:
+    with connect() as conn:
+        settings = _settings_dict(conn)
+        aliases = [
+            {"model_name": row["model_name"], "friendly_name": row["friendly_name"]}
+            for row in conn.execute("SELECT model_name, friendly_name FROM model_aliases ORDER BY lower(model_name)").fetchall()
+        ]
+        models = _model_candidates(conn)
+    return {"settings": settings, "aliases": aliases, "models": models}
+
+
+def save_settings(settings: dict[str, Any] | None, aliases: list[dict[str, Any]] | None) -> dict[str, Any]:
+    clean_settings = _coerce_settings(settings or {})
+    clean_aliases: dict[str, str] = {}
+    for alias in aliases or []:
+        if not isinstance(alias, dict):
+            continue
+        model_name = str(alias.get("model_name") or "").strip()
+        friendly_name = str(alias.get("friendly_name") or "").strip()
+        if model_name and friendly_name:
+            clean_aliases[model_name] = friendly_name
+
+    with connect() as conn:
+        for key, value in clean_settings.items():
+            conn.execute(
+                """
+                INSERT INTO settings(key, value_json) VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
+                """,
+                (key, _dump(value)),
+            )
+        conn.execute("DELETE FROM model_aliases")
+        now = time.time()
+        conn.executemany(
+            "INSERT INTO model_aliases(model_name, friendly_name, updated_at) VALUES(?, ?, ?)",
+            [(model_name, friendly_name, now) for model_name, friendly_name in sorted(clean_aliases.items(), key=lambda item: item[0].lower())],
+        )
+    return get_settings()
+
+
+def _run_summary(row: dict[str, Any], display_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    summary = {
         "prompt_id": row["prompt_id"],
         "status": row["status"],
         "completed": bool(row["completed"]),
@@ -468,6 +541,76 @@ def _run_summary(row: dict[str, Any]) -> dict[str, Any]:
         "excluded_from_stats": bool(row.get("excluded_from_stats", 0)),
         "exclusion_note": row.get("exclusion_note"),
     }
+    return _add_model_display(summary, "primary_model", "primary_model_display", display_config)
+
+
+def _settings_dict(conn: sqlite3.Connection) -> dict[str, Any]:
+    settings = dict(DEFAULT_SETTINGS)
+    rows = conn.execute("SELECT key, value_json FROM settings").fetchall()
+    for row in rows:
+        if row["key"] in DEFAULT_SETTINGS:
+            settings[row["key"]] = _load(row["value_json"])
+    return _coerce_settings(settings)
+
+
+def _coerce_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    coerced = dict(DEFAULT_SETTINGS)
+    if "use_friendly_model_names" in settings:
+        coerced["use_friendly_model_names"] = bool(settings["use_friendly_model_names"])
+    if "hide_file_extensions" in settings:
+        coerced["hide_file_extensions"] = bool(settings["hide_file_extensions"])
+    if "stats_limit" in settings:
+        try:
+            coerced["stats_limit"] = min(max(int(settings["stats_limit"]), 10), 200)
+        except (TypeError, ValueError):
+            coerced["stats_limit"] = DEFAULT_SETTINGS["stats_limit"]
+    return coerced
+
+
+def _display_config(conn: sqlite3.Connection) -> dict[str, Any]:
+    return {
+        "settings": _settings_dict(conn),
+        "aliases": {
+            row["model_name"]: row["friendly_name"]
+            for row in conn.execute("SELECT model_name, friendly_name FROM model_aliases").fetchall()
+        },
+    }
+
+
+def _add_model_display(row: dict[str, Any], source_key: str, target_key: str, display_config: dict[str, Any] | None) -> dict[str, Any]:
+    row[target_key] = _display_model_name(row.get(source_key), display_config)
+    return row
+
+
+def _display_model_name(model_name: str | None, display_config: dict[str, Any] | None) -> str | None:
+    if not model_name:
+        return model_name
+    settings = (display_config or {}).get("settings") or DEFAULT_SETTINGS
+    aliases = (display_config or {}).get("aliases") or {}
+    if settings.get("use_friendly_model_names", True) and model_name in aliases:
+        return aliases[model_name]
+    if settings.get("hide_file_extensions", True):
+        lower_name = model_name.lower()
+        for extension in MODEL_EXTENSIONS:
+            if lower_name.endswith(extension):
+                return model_name[: -len(extension)]
+    return model_name
+
+
+def _model_candidates(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT name FROM (
+            SELECT primary_model AS name FROM runs WHERE primary_model IS NOT NULL AND primary_model != ''
+            UNION
+            SELECT name FROM run_models WHERE name IS NOT NULL AND name != ''
+            UNION
+            SELECT model_name AS name FROM model_aliases WHERE model_name IS NOT NULL AND model_name != ''
+        )
+        ORDER BY lower(name)
+        """
+    ).fetchall()
+    return [row["name"] for row in rows]
 
 
 def _dump(value: Any) -> str:

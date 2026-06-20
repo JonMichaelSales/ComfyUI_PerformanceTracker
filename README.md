@@ -14,7 +14,8 @@ V1 is intentionally workflow-level tracking. It does not patch core node executi
   - sampler, scheduler, steps, CFG, seed, denoise
   - width, height, batch size
   - output filenames when Comfy history provides them
-- Adds a Performance panel with tabs for Models, Recent Runs, Workflows, and LoRAs.
+- Adds a Performance panel with tabs for Models, Recent Runs, Workflows, LoRAs, and Settings.
+- Provides display settings for row limits, hiding model file extensions, and mapping model filenames to friendly names.
 - Includes admin clear-history action with confirmation in the UI.
 
 ## Installation
@@ -32,6 +33,7 @@ Restart ComfyUI. The extension has no external Python dependencies.
 - Existing generations are not backfilled in V1 because ComfyUI history does not always include enough timing context for older runs.
 - The database keeps unlimited local history by default.
 - Clearing history only deletes tracker records. It does not delete generated images or workflows.
+- Friendly model names are display-only. Raw filenames remain stored and are still used for grouping and filtering.
 
 ## Publishing
 

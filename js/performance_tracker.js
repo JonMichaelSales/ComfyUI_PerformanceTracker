@@ -42,6 +42,10 @@ function formatRunCount(row) {
   return excluded ? `${included} (+${excluded} excluded)` : String(included);
 }
 
+function modelLabel(row, sourceKey = "primary_model") {
+  return row?.[`${sourceKey}_display`] || row?.[sourceKey] || "-";
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`${API_ROOT}${path}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -64,6 +68,9 @@ class PerformanceTrackerPanel {
     this.activeTab = "models";
     this.loaded = false;
     this.limit = 50;
+    this.settings = { use_friendly_model_names: true, hide_file_extensions: true, stats_limit: 50 };
+    this.aliases = [];
+    this.modelCandidates = [];
     this.root = el("section", { class: "pt-panel", "aria-label": "Performance Tracker" });
     this.button = embedded ? null : el("button", { class: "pt-rail-button", text: "Perf", title: "Performance Tracker", onclick: () => this.toggle() });
     this.build();
@@ -96,7 +103,7 @@ class PerformanceTrackerPanel {
 
     this.overview = el("div", { class: "pt-overview" });
     this.tabs = el("nav", { class: "pt-tabs" });
-    for (const [id, label] of [["models", "Models"], ["recent", "Recent Runs"], ["workflows", "Workflows"], ["loras", "LoRAs"]]) {
+    for (const [id, label] of [["models", "Models"], ["recent", "Recent Runs"], ["workflows", "Workflows"], ["loras", "LoRAs"], ["settings", "Settings"]]) {
       this.tabs.append(el("button", { text: label, "data-tab": id, onclick: () => this.setTab(id) }));
     }
     this.content = el("div", { class: "pt-content" });
@@ -134,6 +141,7 @@ class PerformanceTrackerPanel {
     this.updateTabButtons();
     this.setStatus("Loading...");
     try {
+      await this.loadSettings();
       const [overview, tabPayload] = await Promise.all([api("/stats/overview"), this.loadTab()]);
       this.renderOverview(overview);
       this.renderTab(tabPayload);
@@ -147,7 +155,16 @@ class PerformanceTrackerPanel {
     if (this.activeTab === "models") return api(`/stats/models?limit=${this.limit}`);
     if (this.activeTab === "recent") return api(`/runs?limit=${this.limit}`);
     if (this.activeTab === "workflows") return api(`/stats/workflows?limit=${this.limit}`);
+    if (this.activeTab === "settings") return Promise.resolve({});
     return api(`/stats/loras?limit=${this.limit}`);
+  }
+
+  async loadSettings() {
+    const payload = await api("/settings");
+    this.settings = { ...this.settings, ...(payload.settings || {}) };
+    this.limit = Number(this.settings.stats_limit) || 50;
+    this.aliases = Array.isArray(payload.aliases) ? payload.aliases : [];
+    this.modelCandidates = Array.isArray(payload.models) ? payload.models : [];
   }
 
   renderOverview(data) {
@@ -168,19 +185,20 @@ class PerformanceTrackerPanel {
     if (this.activeTab === "models") this.renderModels(payload.models || []);
     else if (this.activeTab === "recent") this.renderRuns(payload.runs || []);
     else if (this.activeTab === "workflows") this.renderWorkflows(payload.workflows || []);
+    else if (this.activeTab === "settings") this.renderSettings();
     else this.renderLoras(payload.loras || []);
   }
 
   renderModels(rows) {
     this.renderTable(["Model", "Runs", "Average", "Fastest", "Slowest", "Avg Steps", "Avg MP"], rows, (row) => [
-      row.model,
+      modelLabel(row, "model"),
       formatRunCount(row),
       formatDuration(row.avg_duration_ms),
       formatDuration(row.fastest_ms),
       formatDuration(row.slowest_ms),
       row.avg_steps ? Number(row.avg_steps).toFixed(1) : "-",
       row.avg_pixels ? (Number(row.avg_pixels) / 1_000_000).toFixed(2) : "-",
-    ], (row) => this.openRunGroup({ type: "model", value: row.model, label: row.model }));
+    ], (row) => this.openRunGroup({ type: "model", value: row.model, label: modelLabel(row, "model") }));
   }
 
   renderRuns(rows) {
@@ -191,7 +209,7 @@ class PerformanceTrackerPanel {
         ...[
           formatDate(row.end_ts || row.start_ts),
           formatDuration(row.duration_ms),
-          row.primary_model || "-",
+          modelLabel(row),
           row.primary_sampler || "-",
           row.primary_steps ?? "-",
           row.primary_width && row.primary_height ? `${row.primary_width}x${row.primary_height} x${row.primary_batch_size || 1}` : "-",
@@ -211,7 +229,7 @@ class PerformanceTrackerPanel {
       formatRunCount(row),
       formatDuration(row.avg_duration_ms),
       formatDuration(row.slowest_ms),
-      row.sample_model || "-",
+      modelLabel(row, "sample_model"),
     ], (row) => this.openRunGroup({ type: "workflow_hash", value: row.workflow_hash, label: shortHash(row.workflow_hash) }));
   }
 
@@ -285,7 +303,7 @@ class PerformanceTrackerPanel {
         ...[
           formatDate(row.end_ts || row.start_ts),
           formatDuration(row.duration_ms),
-          row.primary_model || "-",
+          modelLabel(row),
           row.primary_sampler || "-",
           row.primary_steps ?? "-",
           row.primary_width && row.primary_height ? `${row.primary_width}x${row.primary_height} x${row.primary_batch_size || 1}` : "-",
@@ -320,7 +338,7 @@ class PerformanceTrackerPanel {
         ]),
         el("div", { class: "pt-detail-grid" }, [
           this.metric("Duration", formatDuration(run.duration_ms)),
-          this.metric("Model", run.primary_model || "-"),
+          this.metric("Model", modelLabel(run)),
           this.metric("Sampler", run.primary_sampler || "-"),
           this.metric("Nodes", `${run.cached_node_count}/${run.executed_node_count}/${run.total_node_count}`),
           this.metric("Averages", run.excluded_from_stats ? "Excluded" : "Included"),
@@ -338,6 +356,117 @@ class PerformanceTrackerPanel {
         el("pre", { text: JSON.stringify(run.factors || {}, null, 2) }),
       ]));
       document.body.append(dialog);
+    } catch (error) {
+      this.setStatus(error.message || String(error), true);
+    }
+  }
+
+  renderSettings() {
+    const useFriendly = el("input", { type: "checkbox" });
+    useFriendly.checked = Boolean(this.settings.use_friendly_model_names);
+    const hideExtensions = el("input", { type: "checkbox" });
+    hideExtensions.checked = Boolean(this.settings.hide_file_extensions);
+    const statsLimit = el("input", { type: "number", min: "10", max: "200", step: "10", value: String(this.settings.stats_limit || 50) });
+
+    const aliasRows = [...this.aliases].sort((a, b) => String(a.model_name || "").localeCompare(String(b.model_name || "")));
+    const table = this.makeAliasTable(aliasRows);
+    const addModel = el("select", {}, [
+      el("option", { value: "", text: "Select model filename" }),
+      ...this.modelCandidates.map((name) => el("option", { value: name, text: name })),
+    ]);
+    const addFriendly = el("input", { type: "text", placeholder: "Friendly name" });
+    const save = el("button", { text: "Save Settings", onclick: async () => {
+      const aliases = this.collectAliasRows(table);
+      this.settings = {
+        use_friendly_model_names: useFriendly.checked,
+        hide_file_extensions: hideExtensions.checked,
+        stats_limit: Number(statsLimit.value) || 50,
+      };
+      await this.saveSettings(aliases);
+    }});
+
+    const addButton = el("button", { text: "Add Mapping", onclick: () => {
+      const modelName = addModel.value.trim();
+      const friendlyName = addFriendly.value.trim();
+      if (!modelName || !friendlyName) return;
+      this.appendAliasRow(table.querySelector("tbody"), modelName, friendlyName);
+      addModel.value = "";
+      addFriendly.value = "";
+    }});
+
+    this.content.replaceChildren(
+      el("div", { class: "pt-settings" }, [
+        el("section", { class: "pt-settings-section" }, [
+          el("h3", { text: "Display" }),
+          el("label", { class: "pt-check" }, [useFriendly, el("span", { text: "Use friendly model names in tables and details" })]),
+          el("label", { class: "pt-check" }, [hideExtensions, el("span", { text: "Hide model file extensions when no friendly name exists" })]),
+          el("label", { class: "pt-field" }, [el("span", { text: "Rows per tab" }), statsLimit]),
+        ]),
+        el("section", { class: "pt-settings-section" }, [
+          el("h3", { text: "Model Name Mapping" }),
+          el("p", { class: "pt-subtle", text: "Map tracked model filenames to shorter names for the Performance views. The raw filenames remain stored for filtering and grouping." }),
+          el("div", { class: "pt-add-alias" }, [addModel, addFriendly, addButton]),
+          table,
+        ]),
+        el("div", { class: "pt-inline-actions" }, [save]),
+      ]),
+    );
+  }
+
+  makeAliasTable(rows) {
+    const table = this.makeTable(["Model Filename", "Friendly Name", ""]);
+    const body = table.querySelector("tbody");
+    for (const row of rows) {
+      this.appendAliasRow(body, row.model_name, row.friendly_name);
+    }
+    return table;
+  }
+
+  appendAliasRow(body, modelName, friendlyName) {
+    const modelInput = el("input", { type: "text", value: modelName || "", list: "pt-model-candidates", placeholder: "model.safetensors" });
+    const friendlyInput = el("input", { type: "text", value: friendlyName || "", placeholder: "Friendly name" });
+    const remove = el("button", { text: "Remove", onclick: (event) => event.currentTarget.closest("tr")?.remove() });
+    const tr = el("tr", {}, [
+      el("td", {}, modelInput),
+      el("td", {}, friendlyInput),
+      el("td", {}, remove),
+    ]);
+    body.append(tr);
+    this.ensureModelDatalist();
+  }
+
+  ensureModelDatalist() {
+    let datalist = this.root.querySelector("#pt-model-candidates");
+    if (!datalist) {
+      datalist = el("datalist", { id: "pt-model-candidates" });
+      this.root.append(datalist);
+    }
+    datalist.replaceChildren(...this.modelCandidates.map((name) => el("option", { value: name })));
+  }
+
+  collectAliasRows(table) {
+    const aliases = [];
+    for (const row of table.querySelectorAll("tbody tr")) {
+      const inputs = row.querySelectorAll("input");
+      const modelName = inputs[0]?.value?.trim();
+      const friendlyName = inputs[1]?.value?.trim();
+      if (modelName && friendlyName) aliases.push({ model_name: modelName, friendly_name: friendlyName });
+    }
+    return aliases;
+  }
+
+  async saveSettings(aliases) {
+    try {
+      const payload = await api("/settings", {
+        method: "POST",
+        body: JSON.stringify({ settings: this.settings, aliases }),
+      });
+      this.settings = payload.settings || this.settings;
+      this.limit = Number(this.settings.stats_limit) || 50;
+      this.aliases = payload.aliases || aliases;
+      this.modelCandidates = payload.models || this.modelCandidates;
+      this.setStatus("Settings saved.");
+      this.renderSettings();
     } catch (error) {
       this.setStatus(error.message || String(error), true);
     }
@@ -521,6 +650,70 @@ function injectStyles() {
     }
     .pt-detail-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 12px 0 12px; }
     .pt-inline-actions { display: flex; gap: 8px; margin: 0 0 16px; }
+    .pt-settings {
+      display: grid;
+      gap: 14px;
+      padding-top: 12px;
+    }
+    .pt-settings-section {
+      border: 1px solid #2f3540;
+      border-radius: 8px;
+      background: #111419;
+      padding: 12px;
+    }
+    .pt-settings-section h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+    }
+    .pt-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0;
+      color: #d1d5db;
+    }
+    .pt-field {
+      display: grid;
+      grid-template-columns: 140px minmax(0, 180px);
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0 0;
+      color: #d1d5db;
+    }
+    .pt-add-alias {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto;
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .pt-settings input,
+    .pt-settings select,
+    .pt-table input {
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+      border: 1px solid #343b46;
+      border-radius: 6px;
+      background: #0f1217;
+      color: #e5e7eb;
+      padding: 6px 8px;
+      font: inherit;
+    }
+    .pt-settings input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      padding: 0;
+    }
+    .pt-settings button,
+    .pt-table button {
+      border: 1px solid #3a3f48;
+      border-radius: 6px;
+      background: #252a33;
+      color: #e5e7eb;
+      padding: 6px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
     .pt-runs-modal { width: min(1100px, 100%); }
     .pt-exclude { color: #fecaca !important; border-color: #6b3030 !important; background: #3b1f24 !important; }
     .pt-include { color: #bbf7d0 !important; border-color: #25633d !important; background: #173822 !important; }
@@ -540,6 +733,7 @@ function injectStyles() {
       .pt-panel { left: 8px; width: calc(100vw - 16px); }
       .pt-overview, .pt-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .pt-header { flex-direction: column; }
+      .pt-add-alias, .pt-field { grid-template-columns: 1fr; }
     }
   ` }));
 }

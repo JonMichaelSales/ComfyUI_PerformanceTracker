@@ -1,0 +1,17 @@
+[project]
+name = "comfyui-performance-tracker"
+description = "Local generation performance history and model timing dashboard for ComfyUI."
+version = "0.1.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/CHANGE-ME/ComfyUI-Performance-Tracker"
+Issues = "https://github.com/CHANGE-ME/ComfyUI-Performance-Tracker/issues"
+
+[tool.comfy]
+PublisherId = "CHANGE-ME"
+DisplayName = "ComfyUI Performance Tracker"
+Icon = "https://raw.githubusercontent.com/CHANGE-ME/ComfyUI-Performance-Tracker/main/icon.png"

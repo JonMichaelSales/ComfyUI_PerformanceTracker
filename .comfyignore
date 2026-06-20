@@ -1,0 +1,9 @@
+.git/
+.github/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+tests/

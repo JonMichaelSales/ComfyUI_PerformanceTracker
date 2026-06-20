@@ -77,6 +77,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             primary_height INTEGER,
             primary_batch_size INTEGER,
             error_summary_json TEXT,
+            excluded_from_stats INTEGER NOT NULL DEFAULT 0,
+            exclusion_note TEXT,
             factors_json TEXT,
             messages_json TEXT,
             created_at REAL NOT NULL,
@@ -141,10 +143,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS ix_runs_duration ON runs(duration_ms)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_runs_model ON runs(primary_model)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_runs_hash ON runs(workflow_hash)")
+    _ensure_column(conn, "runs", "excluded_from_stats", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "runs", "exclusion_note", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_runs_excluded ON runs(excluded_from_stats)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_models_name ON run_models(name)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_loras_name ON run_loras(name)")
     if conn.execute("SELECT COUNT(*) AS count FROM schema_info").fetchone()["count"] == 0:
         conn.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def capture_prompt(prompt_id: str, prompt: dict[str, Any], extra_data: dict[str, Any] | None) -> None:
@@ -293,7 +304,15 @@ def persist_run(prompt_id: str, payload: dict[str, Any], factors: dict[str, Any]
         )
 
 
-def list_runs(limit: int, offset: int, model: str | None = None, status: str | None = None) -> dict[str, Any]:
+def list_runs(
+    limit: int,
+    offset: int,
+    model: str | None = None,
+    status: str | None = None,
+    lora: str | None = None,
+    workflow_hash: str | None = None,
+    include_excluded: bool = True,
+) -> dict[str, Any]:
     where = ["1 = 1"]
     params: list[Any] = []
     if model:
@@ -302,6 +321,14 @@ def list_runs(limit: int, offset: int, model: str | None = None, status: str | N
     if status:
         where.append("status = ?")
         params.append(status)
+    if workflow_hash:
+        where.append("workflow_hash = ?")
+        params.append(workflow_hash)
+    if lora:
+        where.append("EXISTS (SELECT 1 FROM run_loras l WHERE l.prompt_id = runs.prompt_id AND l.name = ?)")
+        params.append(lora)
+    if not include_excluded:
+        where.append("excluded_from_stats = 0")
     clause = " AND ".join(where)
     with connect() as conn:
         total = conn.execute(f"SELECT COUNT(*) AS count FROM runs WHERE {clause}", params).fetchone()["count"]
@@ -311,6 +338,14 @@ def list_runs(limit: int, offset: int, model: str | None = None, status: str | N
         ).fetchall()
     return {"runs": [_run_summary(dict(row)) for row in rows], "total": total, "limit": limit, "offset": offset, "has_more": offset + len(rows) < total}
 
+
+def set_run_exclusion(prompt_id: str, excluded: bool, note: str | None = None) -> bool:
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET excluded_from_stats = ?, exclusion_note = ?, updated_at = ? WHERE prompt_id = ?",
+            (1 if excluded else 0, note, time.time(), prompt_id),
+        )
+        return cur.rowcount > 0
 
 def get_run(prompt_id: str) -> dict[str, Any] | None:
     with connect() as conn:
@@ -335,7 +370,7 @@ def stats_overview() -> dict[str, Any]:
                    AVG(CASE WHEN total_node_count > 0 THEN CAST(cached_node_count AS REAL) / total_node_count ELSE 0 END) AS avg_cache_rate,
                    MIN(duration_ms) AS fastest_ms,
                    MAX(duration_ms) AS slowest_ms
-            FROM runs WHERE duration_ms IS NOT NULL
+            FROM runs WHERE duration_ms IS NOT NULL AND excluded_from_stats = 0
             """
         ).fetchone()
     return dict(row)
@@ -346,61 +381,61 @@ def stats_models(limit: int = 50) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT COALESCE(primary_model, '(unknown)') AS model,
-                   COUNT(*) AS run_count,
-                   AVG(duration_ms) AS avg_duration_ms,
-                   MIN(duration_ms) AS fastest_ms,
-                   MAX(duration_ms) AS slowest_ms,
-                   AVG(primary_steps) AS avg_steps,
-                   AVG(primary_width * primary_height * COALESCE(primary_batch_size, 1)) AS avg_pixels
+                   SUM(CASE WHEN excluded_from_stats = 0 THEN 1 ELSE 0 END) AS run_count,
+                   SUM(CASE WHEN excluded_from_stats = 1 THEN 1 ELSE 0 END) AS excluded_count,
+                   AVG(CASE WHEN excluded_from_stats = 0 THEN duration_ms END) AS avg_duration_ms,
+                   MIN(CASE WHEN excluded_from_stats = 0 THEN duration_ms END) AS fastest_ms,
+                   MAX(CASE WHEN excluded_from_stats = 0 THEN duration_ms END) AS slowest_ms,
+                   AVG(CASE WHEN excluded_from_stats = 0 THEN primary_steps END) AS avg_steps,
+                   AVG(CASE WHEN excluded_from_stats = 0 THEN primary_width * primary_height * COALESCE(primary_batch_size, 1) END) AS avg_pixels
             FROM runs
             WHERE duration_ms IS NOT NULL
             GROUP BY COALESCE(primary_model, '(unknown)')
-            ORDER BY avg_duration_ms DESC
+            ORDER BY avg_duration_ms IS NULL ASC, avg_duration_ms DESC, run_count DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
-
 
 def stats_loras(limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT l.name AS lora,
-                   COUNT(DISTINCT r.prompt_id) AS run_count,
-                   AVG(r.duration_ms) AS avg_duration_ms
+                   SUM(CASE WHEN r.excluded_from_stats = 0 THEN 1 ELSE 0 END) AS run_count,
+                   SUM(CASE WHEN r.excluded_from_stats = 1 THEN 1 ELSE 0 END) AS excluded_count,
+                   AVG(CASE WHEN r.excluded_from_stats = 0 THEN r.duration_ms END) AS avg_duration_ms
             FROM run_loras l
             JOIN runs r ON r.prompt_id = l.prompt_id
             WHERE r.duration_ms IS NOT NULL
             GROUP BY l.name
-            ORDER BY avg_duration_ms DESC
+            ORDER BY avg_duration_ms IS NULL ASC, avg_duration_ms DESC, run_count DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
-
 
 def stats_workflows(limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT workflow_hash,
-                   COUNT(*) AS run_count,
-                   AVG(duration_ms) AS avg_duration_ms,
-                   MAX(duration_ms) AS slowest_ms,
+                   SUM(CASE WHEN excluded_from_stats = 0 THEN 1 ELSE 0 END) AS run_count,
+                   SUM(CASE WHEN excluded_from_stats = 1 THEN 1 ELSE 0 END) AS excluded_count,
+                   AVG(CASE WHEN excluded_from_stats = 0 THEN duration_ms END) AS avg_duration_ms,
+                   MAX(CASE WHEN excluded_from_stats = 0 THEN duration_ms END) AS slowest_ms,
                    MAX(primary_model) AS sample_model
             FROM runs
             WHERE duration_ms IS NOT NULL
             GROUP BY workflow_hash
-            ORDER BY avg_duration_ms DESC
+            ORDER BY avg_duration_ms IS NULL ASC, avg_duration_ms DESC, run_count DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
-
 
 def clear_history() -> None:
     with connect() as conn:
@@ -430,6 +465,8 @@ def _run_summary(row: dict[str, Any]) -> dict[str, Any]:
         "primary_width": row["primary_width"],
         "primary_height": row["primary_height"],
         "primary_batch_size": row["primary_batch_size"],
+        "excluded_from_stats": bool(row.get("excluded_from_stats", 0)),
+        "exclusion_note": row.get("exclusion_note"),
     }
 
 
@@ -444,3 +481,6 @@ def _load(value: str | None) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return value
+
+
+

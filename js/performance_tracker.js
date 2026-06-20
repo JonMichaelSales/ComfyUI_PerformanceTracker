@@ -36,6 +36,12 @@ function shortHash(hash) {
   return hash ? String(hash).slice(0, 10) : "-";
 }
 
+function formatRunCount(row) {
+  const included = Number(row.run_count) || 0;
+  const excluded = Number(row.excluded_count) || 0;
+  return excluded ? `${included} (+${excluded} excluded)` : String(included);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`${API_ROOT}${path}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -161,19 +167,19 @@ class PerformanceTrackerPanel {
   renderModels(rows) {
     this.renderTable(["Model", "Runs", "Average", "Fastest", "Slowest", "Avg Steps", "Avg MP"], rows, (row) => [
       row.model,
-      row.run_count,
+      formatRunCount(row),
       formatDuration(row.avg_duration_ms),
       formatDuration(row.fastest_ms),
       formatDuration(row.slowest_ms),
       row.avg_steps ? Number(row.avg_steps).toFixed(1) : "-",
       row.avg_pixels ? (Number(row.avg_pixels) / 1_000_000).toFixed(2) : "-",
-    ]);
+    ], (row) => this.openRunGroup({ type: "model", value: row.model, label: row.model }));
   }
 
   renderRuns(rows) {
-    const table = this.makeTable(["When", "Duration", "Model", "Sampler", "Steps", "Resolution", "Nodes", "Status"]);
+    const table = this.makeTable(["When", "Duration", "Model", "Sampler", "Steps", "Resolution", "Nodes", "Status", "Avg"]);
     for (const row of rows) {
-      const tr = el("tr", { onclick: () => this.openRun(row.prompt_id), title: "Open run detail" });
+      const tr = el("tr", { class: row.excluded_from_stats ? "is-excluded" : "", onclick: () => this.openRun(row.prompt_id), title: "Open run detail" });
       tr.append(
         ...[
           formatDate(row.end_ts || row.start_ts),
@@ -184,6 +190,7 @@ class PerformanceTrackerPanel {
           row.primary_width && row.primary_height ? `${row.primary_width}x${row.primary_height} x${row.primary_batch_size || 1}` : "-",
           `${row.cached_node_count}/${row.executed_node_count}/${row.total_node_count}`,
           row.status || "-",
+          row.excluded_from_stats ? "Excluded" : "Included",
         ].map((value) => el("td", { text: String(value) })),
       );
       table.querySelector("tbody").append(tr);
@@ -194,26 +201,27 @@ class PerformanceTrackerPanel {
   renderWorkflows(rows) {
     this.renderTable(["Workflow", "Runs", "Average", "Slowest", "Sample Model"], rows, (row) => [
       shortHash(row.workflow_hash),
-      row.run_count,
+      formatRunCount(row),
       formatDuration(row.avg_duration_ms),
       formatDuration(row.slowest_ms),
       row.sample_model || "-",
-    ]);
+    ], (row) => this.openRunGroup({ type: "workflow_hash", value: row.workflow_hash, label: shortHash(row.workflow_hash) }));
   }
 
   renderLoras(rows) {
     this.renderTable(["LoRA", "Runs", "Average"], rows, (row) => [
       row.lora,
-      row.run_count,
+      formatRunCount(row),
       formatDuration(row.avg_duration_ms),
-    ]);
+    ], (row) => this.openRunGroup({ type: "lora", value: row.lora, label: row.lora }));
   }
 
-  renderTable(headers, rows, mapRow) {
+  renderTable(headers, rows, mapRow, onRowClick = null) {
     const table = this.makeTable(headers);
     const body = table.querySelector("tbody");
     for (const row of rows) {
-      body.append(el("tr", {}, mapRow(row).map((value) => el("td", { text: String(value ?? "-") }))));
+      const attrs = onRowClick ? { class: "is-clickable", title: "Show individual runs", onclick: () => onRowClick(row) } : {};
+      body.append(el("tr", attrs, mapRow(row).map((value) => el("td", { text: String(value ?? "-") }))));
     }
     this.content.replaceChildren(rows.length ? table : this.empty("No matching records yet."));
   }
@@ -223,6 +231,72 @@ class PerformanceTrackerPanel {
       el("thead", {}, el("tr", {}, headers.map((header) => el("th", { text: header })))),
       el("tbody"),
     ]);
+  }
+
+  async openRunGroup(group) {
+    try {
+      const queryKey = group.type === "workflow_hash" ? "workflow_hash" : group.type;
+      const payload = await api(`/runs?limit=200&include_excluded=1&${queryKey}=${encodeURIComponent(group.value || "")}`);
+      const dialog = el("div", { class: "pt-modal-backdrop", onclick: (event) => {
+        if (event.target === dialog) dialog.remove();
+      }});
+      const table = this.makeGroupRunsTable(payload.runs || [], dialog, group);
+      dialog.append(el("div", { class: "pt-modal pt-runs-modal" }, [
+        el("header", {}, [
+          el("div", {}, [
+            el("h3", { text: `${group.type === "workflow_hash" ? "Workflow" : group.type === "lora" ? "LoRA" : "Model"}: ${group.label || "-"}` }),
+            el("p", { class: "pt-subtle", text: `${payload.total || 0} recorded runs. Excluded runs stay in history but do not affect averages.` }),
+          ]),
+          el("button", { text: "x", onclick: () => dialog.remove() }),
+        ]),
+        table || this.empty("No runs found for this item."),
+      ]));
+      document.body.append(dialog);
+    } catch (error) {
+      this.setStatus(error.message || String(error), true);
+    }
+  }
+
+  makeGroupRunsTable(rows, dialog, group) {
+    if (!rows.length) return null;
+    const table = this.makeTable(["When", "Duration", "Model", "Sampler", "Steps", "Resolution", "Nodes", "Avg", "Action"]);
+    const body = table.querySelector("tbody");
+    for (const row of rows) {
+      const action = el("button", {
+        class: row.excluded_from_stats ? "pt-include" : "pt-exclude",
+        text: row.excluded_from_stats ? "Include" : "Exclude",
+        onclick: async (event) => {
+          event.stopPropagation();
+          await this.setRunExcluded(row.prompt_id, !row.excluded_from_stats);
+          dialog.remove();
+          await this.openRunGroup(group);
+          await this.refresh();
+        },
+      });
+      const tr = el("tr", { class: row.excluded_from_stats ? "is-excluded" : "", onclick: () => this.openRun(row.prompt_id), title: "Open run detail" });
+      tr.append(
+        ...[
+          formatDate(row.end_ts || row.start_ts),
+          formatDuration(row.duration_ms),
+          row.primary_model || "-",
+          row.primary_sampler || "-",
+          row.primary_steps ?? "-",
+          row.primary_width && row.primary_height ? `${row.primary_width}x${row.primary_height} x${row.primary_batch_size || 1}` : "-",
+          `${row.cached_node_count}/${row.executed_node_count}/${row.total_node_count}`,
+          row.excluded_from_stats ? "Excluded" : "Included",
+        ].map((value) => el("td", { text: String(value) })),
+        el("td", {}, action),
+      );
+      body.append(tr);
+    }
+    return table;
+  }
+
+  async setRunExcluded(promptId, excluded) {
+    await api(`/runs/${encodeURIComponent(promptId)}/exclusion`, {
+      method: "POST",
+      body: JSON.stringify({ excluded, note: excluded ? "Excluded from aggregate averages" : null }),
+    });
   }
 
   async openRun(promptId) {
@@ -242,6 +316,14 @@ class PerformanceTrackerPanel {
           this.metric("Model", run.primary_model || "-"),
           this.metric("Sampler", run.primary_sampler || "-"),
           this.metric("Nodes", `${run.cached_node_count}/${run.executed_node_count}/${run.total_node_count}`),
+          this.metric("Averages", run.excluded_from_stats ? "Excluded" : "Included"),
+        ]),
+        el("div", { class: "pt-inline-actions" }, [
+          el("button", { text: run.excluded_from_stats ? "Include in Averages" : "Exclude from Averages", onclick: async () => {
+            await this.setRunExcluded(run.prompt_id, !run.excluded_from_stats);
+            dialog.remove();
+            await this.refresh();
+          }}),
         ]),
         el("h4", { text: "Outputs" }),
         el("pre", { text: outputs }),
@@ -377,6 +459,9 @@ function injectStyles() {
       z-index: 1;
     }
     .pt-table tbody tr:hover { background: #20242b; cursor: default; }
+    .pt-table tbody tr.is-clickable:hover, .pt-table tbody tr[title]:hover { cursor: pointer; }
+    .pt-table tbody tr.is-excluded { color: #8b95a5; background: rgba(75, 85, 99, 0.18); }
+    .pt-table tbody tr.is-excluded td { text-decoration: none; }
     .pt-empty, .pt-status {
       padding: 12px 16px;
       color: #9ca3af;
@@ -405,6 +490,8 @@ function injectStyles() {
     }
     .pt-modal header { display: flex; justify-content: space-between; align-items: center; }
     .pt-modal h3, .pt-modal h4 { margin: 0 0 10px; }
+    .pt-modal p { margin: 2px 0 0; }
+    .pt-subtle { color: #9ca3af; }
     .pt-modal button {
       border: 1px solid #3a3f48;
       border-radius: 6px;
@@ -413,7 +500,11 @@ function injectStyles() {
       padding: 5px 9px;
       cursor: pointer;
     }
-    .pt-detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 12px 0 16px; }
+    .pt-detail-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 12px 0 12px; }
+    .pt-inline-actions { display: flex; gap: 8px; margin: 0 0 16px; }
+    .pt-runs-modal { width: min(1100px, 100%); }
+    .pt-exclude { color: #fecaca !important; border-color: #6b3030 !important; background: #3b1f24 !important; }
+    .pt-include { color: #bbf7d0 !important; border-color: #25633d !important; background: #173822 !important; }
     .pt-modal pre {
       max-height: 300px;
       overflow: auto;
@@ -442,3 +533,5 @@ app.registerExtension({
     panel.mount();
   },
 });
+
+

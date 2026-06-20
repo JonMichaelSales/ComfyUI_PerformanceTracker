@@ -9,6 +9,7 @@ from .database import (
     clear_history,
     get_run,
     list_runs,
+    set_run_exclusion,
     stats_loras,
     stats_models,
     stats_overview,
@@ -34,6 +35,9 @@ def register_routes() -> None:
             offset=offset,
             model=_clean(request.query.get("model")),
             status=_clean(request.query.get("status")),
+            lora=_clean(request.query.get("lora")),
+            workflow_hash=_clean(request.query.get("workflow_hash")),
+            include_excluded=request.query.get("include_excluded", "1") != "0",
         )
         return web.json_response(payload)
 
@@ -43,6 +47,19 @@ def register_routes() -> None:
         if run is None:
             return _json_error(404, "NOT_FOUND", "Run not found.")
         return web.json_response(run)
+
+    @routes.post("/performance-tracker/runs/{prompt_id}/exclusion")
+    async def performance_run_exclusion(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        excluded = bool(body.get("excluded"))
+        note = _clean(body.get("note")) if isinstance(body, dict) else None
+        updated = set_run_exclusion(request.match_info["prompt_id"], excluded, note)
+        if not updated:
+            return _json_error(404, "NOT_FOUND", "Run not found.")
+        return web.json_response({"updated": True, "excluded_from_stats": excluded})
 
     @routes.get("/performance-tracker/stats/overview")
     async def performance_overview(request: web.Request) -> web.Response:
@@ -95,3 +112,6 @@ def _json_error(status: int, code: str, message: str, details: dict[str, Any] | 
         {"error": {"code": code, "message": message, "details": details or {}}},
         status=status,
     )
+
+
+

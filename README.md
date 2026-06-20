@@ -16,6 +16,7 @@ V1 is intentionally workflow-level tracking. It does not patch core node executi
   - output filenames when Comfy history provides them
 - Adds a Performance panel with tabs for Models, Recent Runs, Workflows, LoRAs, and Settings.
 - Provides display settings for row limits, hiding model file extensions, and mapping model filenames to friendly names.
+- Exposes optional asset-link APIs so Asset Browser can enrich generated assets with run timing and Performance Tracker can preview run outputs.
 - Includes admin clear-history action with confirmation in the UI.
 
 ## Installation
@@ -34,6 +35,13 @@ Restart ComfyUI. The extension has no external Python dependencies.
 - The database keeps unlimited local history by default.
 - Clearing history only deletes tracker records. It does not delete generated images or workflows.
 - Friendly model names are display-only. Raw filenames remain stored and are still used for grouping and filtering.
+- Asset links use ComfyUI output filename, subfolder, and type. If Asset Browser is installed, run-output thumbnails can open the matching Asset Browser detail view; otherwise they fall back to the raw `/view` image URL.
+
+## API additions
+
+- `GET /performance-tracker/health`
+- `GET /performance-tracker/assets/by-output?filename=&subfolder=&type=`
+- `GET /performance-tracker/runs/{prompt_id}/assets`
 
 ## Publishing
 

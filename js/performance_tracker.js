@@ -74,6 +74,10 @@ class PerformanceTrackerPanel {
     this.root = el("section", { class: "pt-panel", "aria-label": "Performance Tracker" });
     this.button = embedded ? null : el("button", { class: "pt-rail-button", text: "Perf", title: "Performance Tracker", onclick: () => this.toggle() });
     this.build();
+    window.ComfyPerformanceTracker = {
+      ...(window.ComfyPerformanceTracker || {}),
+      openRun: (promptId) => this.openRun(promptId),
+    };
   }
 
   mount(parent = document.body) {
@@ -349,11 +353,44 @@ class PerformanceTrackerPanel {
             dialog.remove();
             await this.refresh();
           }}),
+          el("button", { text: "Open Assets from this Run", onclick: () => this.openRunAssets(run.prompt_id) }),
         ]),
         el("h4", { text: "Outputs" }),
         el("pre", { text: outputs }),
         el("h4", { text: "Extracted Factors" }),
         el("pre", { text: JSON.stringify(run.factors || {}, null, 2) }),
+      ]));
+      document.body.append(dialog);
+    } catch (error) {
+      this.setStatus(error.message || String(error), true);
+    }
+  }
+
+  async openRunAssets(promptId) {
+    try {
+      const payload = await api(`/runs/${encodeURIComponent(promptId)}/assets`);
+      const outputs = payload.outputs || [];
+      const dialog = el("div", { class: "pt-modal-backdrop", onclick: (event) => {
+        if (event.target === dialog) dialog.remove();
+      }});
+      dialog.append(el("div", { class: "pt-modal pt-assets-modal" }, [
+        el("header", {}, [
+          el("h3", { text: "Run Assets" }),
+          el("button", { text: "x", onclick: () => dialog.remove() }),
+        ]),
+        outputs.length ? el("div", { class: "pt-asset-grid" }, outputs.map((output) => {
+          const button = el("button", { title: output.filename || "", onclick: async () => {
+            if (window.ComfyAssetBrowser?.openByOutput && output.filename) {
+              const opened = await window.ComfyAssetBrowser.openByOutput(output.filename);
+              if (opened) return;
+            }
+            window.open(output.view_url, "_blank");
+          } }, [
+            el("img", { src: output.view_url || "", alt: "" }),
+            el("span", { text: output.subfolder ? `${output.subfolder}/${output.filename}` : output.filename || "-" }),
+          ]);
+          return button;
+        })) : this.empty("No generated asset filenames recorded for this run."),
       ]));
       document.body.append(dialog);
     } catch (error) {
@@ -715,6 +752,33 @@ function injectStyles() {
       white-space: nowrap;
     }
     .pt-runs-modal { width: min(1100px, 100%); }
+    .pt-assets-modal { width: min(980px, 100%); }
+    .pt-asset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .pt-asset-grid button {
+      min-width: 0;
+      padding: 0;
+      overflow: hidden;
+      text-align: left;
+    }
+    .pt-asset-grid img {
+      display: block;
+      width: 100%;
+      height: 120px;
+      object-fit: contain;
+      background: #05070a;
+    }
+    .pt-asset-grid span {
+      display: block;
+      padding: 6px 8px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .pt-exclude { color: #fecaca !important; border-color: #6b3030 !important; background: #3b1f24 !important; }
     .pt-include { color: #bbf7d0 !important; border-color: #25633d !important; background: #173822 !important; }
     .pt-modal pre {

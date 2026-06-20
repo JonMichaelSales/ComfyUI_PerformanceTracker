@@ -8,6 +8,8 @@ from server import PromptServer
 from .database import (
     clear_history,
     get_run,
+    get_run_by_output,
+    get_run_output_assets,
     get_settings,
     list_runs,
     save_settings,
@@ -27,6 +29,10 @@ def register_routes() -> None:
         return
     _ROUTES_REGISTERED = True
     routes = PromptServer.instance.routes
+
+    @routes.get("/performance-tracker/health")
+    async def performance_health(request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, "name": "ComfyUI-Performance-Tracker"})
 
     @routes.get("/performance-tracker/runs")
     async def performance_runs(request: web.Request) -> web.Response:
@@ -49,6 +55,27 @@ def register_routes() -> None:
         if run is None:
             return _json_error(404, "NOT_FOUND", "Run not found.")
         return web.json_response(run)
+
+    @routes.get("/performance-tracker/runs/{prompt_id}/assets")
+    async def performance_run_assets(request: web.Request) -> web.Response:
+        payload = get_run_output_assets(request.match_info["prompt_id"])
+        if payload is None:
+            return _json_error(404, "NOT_FOUND", "Run not found.")
+        return web.json_response(payload)
+
+    @routes.get("/performance-tracker/assets/by-output")
+    async def performance_asset_by_output(request: web.Request) -> web.Response:
+        filename = _clean(request.query.get("filename"))
+        if not filename:
+            return _json_error(400, "BAD_OUTPUT", "filename is required.")
+        run = get_run_by_output(
+            filename=filename,
+            subfolder=_clean(request.query.get("subfolder")) or "",
+            file_type=_clean(request.query.get("type")) or "output",
+        )
+        if run is None:
+            return _json_error(404, "NOT_FOUND", "No run found for that output.")
+        return web.json_response({"run": run})
 
     @routes.post("/performance-tracker/runs/{prompt_id}/exclusion")
     async def performance_run_exclusion(request: web.Request) -> web.Response:

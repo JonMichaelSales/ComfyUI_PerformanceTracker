@@ -392,6 +392,45 @@ def get_run(prompt_id: str) -> dict[str, Any] | None:
     return detail
 
 
+def get_run_by_output(filename: str, subfolder: str = "", file_type: str = "output") -> dict[str, Any] | None:
+    with connect() as conn:
+        display_config = _display_config(conn)
+        row = conn.execute(
+            """
+            SELECT r.*
+            FROM runs r
+            JOIN run_outputs o ON o.prompt_id = r.prompt_id
+            WHERE o.filename = ? AND COALESCE(o.subfolder, '') = ? AND COALESCE(o.type, 'output') = ?
+            ORDER BY COALESCE(r.end_ts, r.updated_at * 1000) DESC
+            LIMIT 1
+            """,
+            (filename, subfolder or "", file_type or "output"),
+        ).fetchone()
+        if not row:
+            return None
+        outputs = conn.execute("SELECT * FROM run_outputs WHERE prompt_id = ?", (row["prompt_id"],)).fetchall()
+    detail = _run_summary(dict(row), display_config)
+    detail["outputs"] = [dict(o) for o in outputs]
+    return detail
+
+
+def get_run_output_assets(prompt_id: str) -> dict[str, Any] | None:
+    run = get_run(prompt_id)
+    if not run:
+        return None
+    return {
+        "prompt_id": prompt_id,
+        "outputs": [
+            {
+                **output,
+                "view_url": _build_view_url(output.get("filename"), output.get("subfolder") or "", output.get("type") or "output"),
+            }
+            for output in run.get("outputs", [])
+            if output.get("filename")
+        ],
+    }
+
+
 def stats_overview() -> dict[str, Any]:
     with connect() as conn:
         row = conn.execute(
@@ -611,6 +650,17 @@ def _model_candidates(conn: sqlite3.Connection) -> list[str]:
         """
     ).fetchall()
     return [row["name"] for row in rows]
+
+
+def _build_view_url(filename: str | None, subfolder: str, file_type: str) -> str | None:
+    if not filename:
+        return None
+    from urllib.parse import quote
+
+    url = f"/view?type={quote(file_type)}&filename={quote(filename)}"
+    if subfolder:
+        url += f"&subfolder={quote(subfolder)}"
+    return url
 
 
 def _dump(value: Any) -> str:
